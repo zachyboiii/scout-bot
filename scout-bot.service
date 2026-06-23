@@ -1,0 +1,16 @@
+[Unit]
+Description=Scout Telegram sourcing bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/scout-bot
+EnvironmentFile=/home/ubuntu/scout-bot/.env
+ExecStart=/home/ubuntu/scout-bot/venv/bin/python /home/ubuntu/scout-bot/bot.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
