@@ -38,6 +38,35 @@ def _is_credit_error(exc: anthropic.APIStatusError) -> bool:
     return "credit balance is too low" in message
 
 
+# Web search only localizes for a subset of countries; an unsupported value in
+# `user_location` 400s. Once we hit that, stop sending the hint for the rest of
+# the process (localization still happens via the prompt + search queries).
+_user_location_supported = True
+
+
+def user_location_supported() -> bool:
+    return _user_location_supported
+
+
+def _disable_user_location() -> None:
+    global _user_location_supported
+    _user_location_supported = False
+
+
+def _is_location_error(exc: anthropic.APIStatusError) -> bool:
+    message = str(getattr(exc, "message", "") or exc).lower()
+    return "user_location" in message or "country code" in message
+
+
+def _strip_user_location(tools) -> bool:
+    """Remove user_location from any tool that has it. True if anything changed."""
+    removed = False
+    for tool in tools or []:
+        if isinstance(tool, dict) and tool.pop("user_location", None) is not None:
+            removed = True
+    return removed
+
+
 @dataclass
 class AgentResponse:
     """The uniform shape every agent returns to the bot.
@@ -153,12 +182,17 @@ class BaseAgent(ABC):
 
     @staticmethod
     def _create(client: Anthropic, **kwargs):
-        """messages.create that translates credit failures to a clear error."""
+        """messages.create with credit-error translation and location fallback."""
         try:
             return client.messages.create(**kwargs)
         except anthropic.APIStatusError as exc:
             if _is_credit_error(exc):
                 raise InsufficientCreditsError(str(exc)) from exc
+            # Unsupported user_location: drop it and retry once, and stop
+            # sending it for the rest of the process.
+            if _is_location_error(exc) and _strip_user_location(kwargs.get("tools")):
+                _disable_user_location()
+                return client.messages.create(**kwargs)
             raise
 
     @staticmethod

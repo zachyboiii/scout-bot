@@ -11,7 +11,9 @@ from __future__ import annotations
 import os
 import re
 
+from . import base
 from .base import BaseAgent, AgentResponse
+
 
 def _env(name: str, default: str) -> str:
     """Read an env var, tolerating inline comments and stray whitespace.
@@ -144,7 +146,12 @@ class ScoutAgent(BaseAgent):
         return self.system_prompt + _locale_block(location or DEFAULT_LOCATION)
 
     def build_tools(self, location: str | None) -> list[dict]:
-        return [{**WEB_SEARCH_TOOL_BASE, "user_location": _user_location(location)}]
+        tool = dict(WEB_SEARCH_TOOL_BASE)
+        # Only attach the location hint while the API still accepts it; some
+        # countries aren't supported, in which case we localize via the prompt.
+        if base.user_location_supported():
+            tool["user_location"] = _user_location(location)
+        return [tool]
 
     def format_response(self, raw_text: str) -> AgentResponse:
         if not raw_text.strip():
