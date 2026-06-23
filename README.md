@@ -90,21 +90,20 @@ prompt instruction. The **default** market comes from the `SCOUT_*` env vars
 with **`/location`** — it takes effect immediately, no redeploy. The override is
 per-user and resets on bot restart.
 
-## Deploy (systemd on Ubuntu)
+## Deploy (Ubuntu / DigitalOcean)
+
+Full step-by-step guide: **[DEPLOY.md](DEPLOY.md)**. In short, on the server:
 
 ```bash
-# On the VM, as the ubuntu user:
-git clone <repo> /home/ubuntu/scout-bot && cd /home/ubuntu/scout-bot
-python3 -m venv venv && ./venv/bin/pip install -r requirements.txt
-cp .env.example .env   # fill in secrets
-
-sudo cp scout-bot.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now scout-bot
-journalctl -u scout-bot -f   # follow logs
+git clone https://github.com/zachyboiii/scout-bot.git /home/ubuntu/scout-bot
+cd /home/ubuntu/scout-bot
+bash deploy/setup.sh     # creates .env on first run; fill it in, then re-run
 ```
 
-The bot uses outbound polling only — no inbound ports needed.
+`deploy/setup.sh` installs Python, builds the venv, generates a `systemd` unit,
+and starts the bot (auto-start on boot, auto-restart on crash). Update later with
+`bash deploy/update.sh`. The bot uses outbound polling only — no inbound ports
+needed.
 
 ## Environment variables
 
@@ -112,4 +111,5 @@ The bot uses outbound polling only — no inbound ports needed.
 |---|---|---|
 | `TELEGRAM_BOT_TOKEN` | ✅ | Bot token from @BotFather |
 | `ANTHROPIC_API_KEY`  | ✅ | Key from console.anthropic.com |
-| `ALLOWED_USER_IDS`   | ❌ | Comma-separated Telegram user IDs. Empty = public |
+| `ALLOWED_USERS`      | ❌ | Comma-separated Telegram user IDs or @usernames. Empty = public |
+| `SCOUT_CITY` / `SCOUT_REGION` / `SCOUT_COUNTRY` / `SCOUT_TIMEZONE` | ❌ | Default market for sourcing (defaults to Singapore). Override per-chat at runtime with `/location` |
