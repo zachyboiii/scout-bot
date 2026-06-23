@@ -13,13 +13,27 @@ import re
 
 from .base import BaseAgent, AgentResponse
 
+def _env(name: str, default: str) -> str:
+    """Read an env var, tolerating inline comments and stray whitespace.
+
+    systemd's EnvironmentFile (used in deployment) does NOT strip inline
+    comments, so a line like `SCOUT_COUNTRY=SG  # ISO code` would otherwise
+    arrive as the whole string including the comment. Strip it defensively.
+    """
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    value = raw.split("#", 1)[0].strip()
+    return value or default
+
+
 # Default home market, used when the user hasn't set a location at runtime
 # (via the bot's /location command). Override the defaults in .env if you like,
 # but day-to-day you change location with /location — no redeploy needed.
-SCOUT_CITY = os.environ.get("SCOUT_CITY", "Singapore")
-SCOUT_REGION = os.environ.get("SCOUT_REGION", "Singapore")
-SCOUT_COUNTRY = os.environ.get("SCOUT_COUNTRY", "SG")  # 2-letter ISO code
-SCOUT_TIMEZONE = os.environ.get("SCOUT_TIMEZONE", "Asia/Singapore")
+SCOUT_CITY = _env("SCOUT_CITY", "Singapore")
+SCOUT_REGION = _env("SCOUT_REGION", "Singapore")
+SCOUT_COUNTRY = _env("SCOUT_COUNTRY", "SG")[:2].upper()  # ISO 2-letter code
+SCOUT_TIMEZONE = _env("SCOUT_TIMEZONE", "Asia/Singapore")
 
 WEB_SEARCH_TOOL_BASE = {
     "type": "web_search_20250305",
