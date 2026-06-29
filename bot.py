@@ -283,12 +283,34 @@ async def _download_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return data, media_type
 
 
+def _is_group_chat(update: Update) -> bool:
+    return update.effective_chat.type in ("group", "supergroup")
+
+
+def _is_mentioned(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Return True if the bot's @username appears in the message text/caption."""
+    bot_username = context.bot.username
+    if not bot_username:
+        return False
+    text = update.message.text or update.message.caption or ""
+    return f"@{bot_username}".lower() in text.lower()
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     if not _is_allowed(user):
         return
 
-    text = update.message.text or update.message.caption or ""
+    if _is_group_chat(update) and not _is_mentioned(update, context):
+        return
+
+    # Strip the @mention from the text before passing to the agent.
+    raw_text = update.message.text or update.message.caption or ""
+    bot_username = context.bot.username
+    if bot_username:
+        text = re.sub(rf"@{re.escape(bot_username)}", "", raw_text, flags=re.IGNORECASE).strip()
+    else:
+        text = raw_text
     image_b64, media_type = await _download_image(update, context)
 
     if not text and not image_b64:
