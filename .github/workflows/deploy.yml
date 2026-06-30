@@ -1,0 +1,48 @@
+name: Deploy to DigitalOcean
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy and restart bot
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.DO_HOST }}
+          username: ${{ secrets.DO_USER }}
+          key: ${{ secrets.DO_SSH_KEY }}
+          script: |
+            set -e
+            cd /home/ubuntu/bots/scout-bot
+
+            # Save current commit so we can roll back if something goes wrong
+            PREV_COMMIT=$(git rev-parse HEAD)
+
+            rollback() {
+              echo "==> Deploy failed — rolling back to $PREV_COMMIT"
+              git reset --hard "$PREV_COMMIT"
+              venv/bin/pip install -r requirements.txt -q
+              sudo systemctl restart scout-bot
+              echo "==> Rollback complete. Previous version is running."
+            }
+
+            trap rollback ERR
+
+            echo "==> Pulling latest changes..."
+            git pull --ff-only
+
+            echo "==> Installing dependencies..."
+            venv/bin/pip install -r requirements.txt -q
+
+            echo "==> Restarting bot..."
+            sudo systemctl restart scout-bot
+
+            echo "==> Verifying service is running..."
+            sleep 2
+            sudo systemctl is-active --quiet scout-bot && echo "==> scout-bot is active." || (echo "==> scout-bot failed to start." && exit 1)
+
+            echo "==> Deploy successful."
