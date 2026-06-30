@@ -26,6 +26,9 @@ from telegram.ext import (
     filters,
 )
 
+# Combined filter for message content types the bot cares about.
+_CONTENT_FILTER = (filters.TEXT & ~filters.COMMAND) | filters.PHOTO | filters.Document.IMAGE
+
 from agents import AgentResponse, InsufficientCreditsError, handle_request
 
 load_dotenv()
@@ -262,15 +265,22 @@ async def location(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def _download_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Return (base64_str, media_type) for an attached photo/image, or (None, None)."""
+    """Return (base64_str, media_type) for an attached photo/image, or (None, None).
+
+    Works for both new and edited messages.
+    """
+    msg = update.message or update.edited_message
+    if not msg:
+        return None, None
+
     file_id = None
     media_type = "image/jpeg"
 
-    if update.message.photo:
-        file_id = update.message.photo[-1].file_id  # highest resolution
-    elif update.message.document and (update.message.document.mime_type or "").startswith("image/"):
-        file_id = update.message.document.file_id
-        media_type = update.message.document.mime_type
+    if msg.photo:
+        file_id = msg.photo[-1].file_id  # highest resolution
+    elif msg.document and (msg.document.mime_type or "").startswith("image/"):
+        file_id = msg.document.file_id
+        media_type = msg.document.mime_type
 
     if not file_id:
         return None, None
@@ -283,16 +293,19 @@ async def _download_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return data, media_type
 
 
-def _is_group_chat(update: Update) -> bool:
-    return update.effective_chat.type in ("group", "supergroup")
-
 
 def _is_mentioned(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    """Return True if the bot's @username appears in the message text/caption."""
+    """Return True if the bot's @username appears in the message text/caption.
+
+    Works for both new and edited messages.
+    """
     bot_username = context.bot.username
     if not bot_username:
         return False
-    text = update.message.text or update.message.caption or ""
+    msg = update.message or update.edited_message
+    if not msg:
+        return False
+    text = msg.text or msg.caption or ""
     return f"@{bot_username}".lower() in text.lower()
 
 
@@ -301,11 +314,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if not _is_allowed(user):
         return
 
-    if _is_group_chat(update) and not _is_mentioned(update, context):
+    # Require @mention in ALL chats (DMs and groups alike).
+    if not _is_mentioned(update, context):
         return
 
+    # Use whichever message object is present (new or edited).
+    msg = update.message or update.edited_message
+
     # Strip the @mention from the text before passing to the agent.
-    raw_text = update.message.text or update.message.caption or ""
+    raw_text = msg.text or msg.caption or ""
     bot_username = context.bot.username
     if bot_username:
         text = re.sub(rf"@{re.escape(bot_username)}", "", raw_text, flags=re.IGNORECASE).strip()
@@ -317,7 +334,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     await context.bot.send_chat_action(update.effective_chat.id, ChatAction.TYPING)
-    status = await update.message.reply_text("🔎 Searching…")
+    status = await msg.reply_text("🔎 Searching…")
 
     history: list[dict] = context.user_data.get("history", [])
 
@@ -345,7 +362,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     await status.delete()
 
-    await _deliver(update.message, response)
+    await _deliver(msg, response)
 
     # Persist text-only history (images noted, not stored).
     user_note = f"[Image + caption]: {text}" if image_b64 else text
@@ -384,12 +401,10 @@ def main() -> None:
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("location", location))
     app.add_handler(CommandHandler("clear", clear))
-    app.add_handler(
-        MessageHandler(
-            (filters.TEXT & ~filters.COMMAND) | filters.PHOTO | filters.Document.IMAGE,
-            handle_message,
-        )
-    )
+    # New messages.
+    app.add_handler(MessageHandler(_CONTENT_FILTER, handle_message))
+    # Edited messages — same handler, triggered when user edits a message.
+    app.add_handler(MessageHandler(filters.UpdateType.EDITED_MESSAGE & _CONTENT_FILTER, handle_message))
     app.add_error_handler(on_error)
 
     if ALLOWED_IDS or ALLOWED_USERNAMES:
