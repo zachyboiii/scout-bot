@@ -102,6 +102,9 @@ class BaseAgent(ABC):
     model: str = DEFAULT_MODEL
     system_prompt: str = ""
     tools: list[dict] | None = None
+    # Optional thinking config forwarded to the API (e.g. {"type": "adaptive"}
+    # on Sonnet 4.6+). None omits the parameter entirely.
+    thinking: dict | None = None
     max_loops: int = 3
     max_tokens: int = 1536
 
@@ -160,6 +163,8 @@ class BaseAgent(ABC):
                 "system": system,
                 "messages": messages,
             }
+            if self.thinking:
+                kwargs["thinking"] = self.thinking
             if tools:
                 kwargs["tools"] = tools
 
@@ -171,13 +176,15 @@ class BaseAgent(ABC):
             # tool_use: server-side tools (e.g. web_search) already ran; loop on.
 
         # Loop budget exhausted — force a final answer with no tools.
-        final = self._create(
-            client,
-            model=self.model,
-            max_tokens=self.max_tokens,
-            system=system,
-            messages=messages,
-        )
+        final_kwargs = {
+            "model": self.model,
+            "max_tokens": self.max_tokens,
+            "system": system,
+            "messages": messages,
+        }
+        if self.thinking:
+            final_kwargs["thinking"] = self.thinking
+        final = self._create(client, **final_kwargs)
         return self._extract_text(final.content)
 
     @staticmethod

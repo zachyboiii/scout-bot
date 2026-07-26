@@ -8,8 +8,12 @@ product image URLs it found.
 
 from __future__ import annotations
 
+import concurrent.futures
+import datetime
 import os
 import re
+
+import httpx
 
 from . import base
 from .base import BaseAgent, AgentResponse
@@ -40,7 +44,9 @@ SCOUT_TIMEZONE = _env("SCOUT_TIMEZONE", "Asia/Singapore")
 WEB_SEARCH_TOOL_BASE = {
     "type": "web_search_20250305",
     "name": "web_search",
-    "max_uses": 3,
+    # Enough budget to both find options and verify they're current (open,
+    # in stock); 3 proved too tight for find-then-verify on 3-5 options.
+    "max_uses": 6,
 }
 
 
@@ -80,6 +86,51 @@ def _locale_block(place: str) -> str:
 IMG_RE = re.compile(r"\[IMG\]\s*(\S+?)\s*\[/IMG\]", re.IGNORECASE)
 # Matches an option/section delimiter line (only dashes).
 DELIM_RE = re.compile(r"(?m)^\s*-{3,}\s*$")
+# Matches the href of an <a> tag in the model's Telegram-HTML output.
+HREF_RE = re.compile(r'<a\s+href="([^"]+)"', re.IGNORECASE)
+
+LINK_CHECK_TIMEOUT = 4.0
+# Some sites serve bots differently; a browser-ish UA reduces false negatives.
+_CHECK_HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; ScoutBot/1.0)"}
+# Statuses that mean the page is definitively gone. 401/403/429 are excluded:
+# retailers often bot-block HEAD/GET probes while the page works in a browser.
+_DEAD_STATUSES = {400, 404, 410}
+
+
+def _url_status(url: str) -> int | None:
+    """Best-effort HTTP status for a URL; None on timeout/network failure.
+
+    Tries HEAD first; many servers reject HEAD, so an error status is
+    confirmed with a body-less GET before being believed.
+    """
+    try:
+        resp = httpx.head(
+            url,
+            headers=_CHECK_HEADERS,
+            timeout=LINK_CHECK_TIMEOUT,
+            follow_redirects=True,
+        )
+        if resp.status_code < 400:
+            return resp.status_code
+        with httpx.stream(
+            "GET",
+            url,
+            headers=_CHECK_HEADERS,
+            timeout=LINK_CHECK_TIMEOUT,
+            follow_redirects=True,
+        ) as get_resp:
+            return get_resp.status_code
+    except httpx.HTTPError:
+        return None
+
+
+def _check_urls(urls: list[str]) -> dict[str, int | None]:
+    """Check URLs concurrently so total latency is ~one timeout, not a sum."""
+    unique = list(dict.fromkeys(urls))
+    if not unique:
+        return {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, len(unique))) as pool:
+        return dict(zip(unique, pool.map(_url_status, unique)))
 
 SYSTEM_PROMPT = """You are Scout, a personal sourcing agent.
 
@@ -103,6 +154,22 @@ stated constraints (budget, size, location, style, date).
 and proceed — do not stall by asking many questions.
 - If an image is provided, identify the product or place in it and use that to \
 drive the search.
+
+LINKS — every URL you output must be one you actually saw in a web_search \
+result. Never construct, guess, shorten, or "fix" a URL, and never reuse a \
+link from memory. Prefer the canonical product or venue page from the search \
+result (the retailer's own product page, the restaurant's own site or its \
+Google Maps / booking page) over aggregators and redirects. If you don't have \
+a real link for an option, drop the option.
+
+CURRENCY — recommendations must be current as of today's date (given below). \
+For physical places (shops, restaurants, venues): check the search results \
+for signs the place is still operating — skip anything marked "permanently \
+closed" or "temporarily closed", and be suspicious if the only mentions are \
+years old. For products: skip listings that are discontinued, sold out, or \
+unavailable. Spend a search verifying status when unsure. Only recommend \
+options you can confirm are currently open / available; if you can't confirm, \
+leave it out.
 
 OUTPUT SCHEMA — return 3 to 4 options. Separate each option (and the final \
 recommendation) with a line containing only three dashes: ---
@@ -143,7 +210,12 @@ class ScoutAgent(BaseAgent):
     system_prompt = SYSTEM_PROMPT
 
     def build_system(self, location: str | None) -> str:
-        return self.system_prompt + _locale_block(location or DEFAULT_LOCATION)
+        today = datetime.date.today().strftime("%d %B %Y")
+        return (
+            self.system_prompt
+            + f"\n\nToday's date is {today}."
+            + _locale_block(location or DEFAULT_LOCATION)
+        )
 
     def build_tools(self, location: str | None) -> list[dict]:
         tool = dict(WEB_SEARCH_TOOL_BASE)
@@ -158,7 +230,29 @@ class ScoutAgent(BaseAgent):
             return AgentResponse(text="Sorry, I couldn't find anything this time.")
 
         images = [m.group(1) for m in IMG_RE.finditer(raw_text)][:10]  # album max
-        return AgentResponse(text=_strip_markers(raw_text), images=images)
+        links = HREF_RE.findall(raw_text)
+        statuses = _check_urls(images + links)
+
+        # Telegram fetches album images itself, so an unreachable image URL can
+        # fail the whole send — keep only images confirmed reachable (2xx).
+        images = [u for u in images if statuses.get(u) and statuses[u] < 300]
+
+        text = _strip_markers(raw_text)
+        # Dead links get unwrapped to plain text rather than dropped, so the
+        # option's name/details survive even when its URL doesn't.
+        for url in links:
+            if statuses.get(url) in _DEAD_STATUSES:
+                text = _unwrap_link(text, url)
+        return AgentResponse(text=text, images=images)
+
+
+def _unwrap_link(text: str, url: str) -> str:
+    """Replace <a href="url">label</a> with just the label."""
+    pattern = re.compile(
+        r'<a\s+href="%s"[^>]*>(.*?)</a>' % re.escape(url),
+        re.IGNORECASE | re.DOTALL,
+    )
+    return pattern.sub(r"\1", text)
 
 
 def _strip_markers(text: str) -> str:
